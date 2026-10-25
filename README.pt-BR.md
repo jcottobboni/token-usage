@@ -66,6 +66,8 @@ pythonw.exe C:\caminho\para\token-usage\server.py
 
 `tray.py` coloca um ícone na barra superior (GNOME, KDE), na área de notificação do Windows ou na barra de menus do macOS. O anel mostra a menor cota restante entre todas as ferramentas. Ao clicar, abre um menu com cada cota, os tokens de hoje e do mês por ferramenta e **Abrir painel detalhado**. Se o `server.py` não estiver rodando, o ícone sobe o painel no mesmo processo.
 
+Em **Mostrar na barra** você escolhe uma cota para aparecer em texto ao lado do ícone (por exemplo `Claude 2%`), em % usado ou restante. A escolha fica em `~/.config/token-usage/tray.json` (`%APPDATA%\token-usage\tray.json` no Windows). No Windows, onde a bandeja não aceita texto, o número aparece dentro do anel.
+
 Precisa de `pystray` e Pillow. No Linux também precisa do PyGObject com AppIndicator; no GNOME, ative a extensão AppIndicator (já vem ativa no Ubuntu).
 
 ```bash
