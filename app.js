@@ -6,14 +6,16 @@ const LABEL = { claude: 'Claude Code', copilot: 'Copilot CLI', codex: 'Codex CLI
                 antigravity: 'Antigravity', input: 'Input', output: 'Output',
                 cache_read: 'Cache lido', cache_write: 'Cache gravado', total: 'Total' };
 const KEYS = ['input', 'output', 'cache_read', 'cache_write'];
-// ferramentas que gravam tokens em disco; o Antigravity só expõe cota
-const TOKEN_SOURCES = ['claude', 'copilot', 'codex', 'gemini'];
+// ferramentas que gravam tokens em disco; do Antigravity, só o CLI (agy) grava
+const TOKEN_SOURCES = ['claude', 'copilot', 'codex', 'gemini', 'antigravity'];
 const DATA_PATHS = { claude: '~/.claude/projects', copilot: '~/.copilot/session-store.db',
-                     codex: '~/.codex/sessions', gemini: '~/.gemini/tmp/*/chats' };
+                     codex: '~/.codex/sessions', gemini: '~/.gemini/tmp/*/chats',
+                     antigravity: '~/.gemini/antigravity-cli/conversations' };
 // nomes de projeto, modelos e mensagens de erro vêm de disco/rede: nunca entram crus no HTML
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const state = { range: 30, source: 'all', metric: 'total', data: null, sort: {} };
-const tokenSources = () => TOKEN_SOURCES.filter(s => state.data.sources.includes(s));
+// o app Antigravity aparece em sources só pela cota; filtra pelas fontes que têm linhas
+const tokenSources = () => TOKEN_SOURCES.filter(s => state.data.sources.includes(s) && state.data.rows.some(r => r.source === s));
 let daily, mix;
 
 Chart.defaults.color = C.muted;
