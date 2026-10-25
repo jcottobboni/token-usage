@@ -14,10 +14,12 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from collections import defaultdict
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -37,6 +39,7 @@ CLAUDE_CREDS = HOME / ".claude" / ".credentials.json"
 COPILOT_STATE = HOME / ".copilot" / "session-state"
 LIMITS_TTL = 60  # segundos entre consultas às APIs de cota
 LIMITS_MIN = 10  # nem o botão de atualizar consulta as APIs mais que isso
+BACKOFF_MAX = 3600  # teto da espera depois de 429 seguidos
 GH = shutil.which("gh") or "/snap/bin/gh"  # systemd não tem /snap/bin no PATH
 # só estes Host são aceitos: bloqueia DNS rebinding de páginas abertas no navegador
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
@@ -216,17 +219,58 @@ def copilot_records() -> list[dict]:
             for ts, model, cwd, sess, inp, outp, cr, cw, mult, initiator in rows]
 
 
+class RateLimited(Exception):
+    """A API respondeu 429: não consulta de novo antes do horário combinado."""
+
+
+# url -> (não consultar antes deste epoch, quantos 429 seguidos)
+_backoff: dict[str, tuple[float, int]] = {}
+
+
+def _retry_after(e: urllib.error.HTTPError) -> float | None:
+    """Segundos pedidos no Retry-After (número ou data HTTP), se houver."""
+    v = e.headers.get("Retry-After") if e.headers else None
+    if not v:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    try:
+        return (parsedate_to_datetime(v) - datetime.now(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
 def _get_json(url: str, headers: dict, body: dict | None = None, context=None) -> dict:
+    until, strikes = _backoff.get(url, (0.0, 0))
+    if time.time() < until:
+        raise RateLimited(f"API limitou as consultas (429); nova tentativa às {datetime.fromtimestamp(until):%H:%M}")
     req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
                                  headers={"User-Agent": "token-usage-dashboard", "Accept": "application/json",
                                           **({"Content-Type": "application/json"} if body is not None else {}),
                                           **headers})
-    with urllib.request.urlopen(req, timeout=10, context=context) as res:
-        return json.load(res)
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=context) as res:
+            data = json.load(res)
+    except urllib.error.HTTPError as e:
+        if e.code != 429:
+            raise
+        # insistir a cada LIMITS_TTL prolonga o bloqueio: dobra a espera a cada 429 seguido
+        strikes += 1
+        # Retry-After manda, mas com teto: uma data absurda não pode congelar a consulta
+        wait = min(max(_retry_after(e) or 0, LIMITS_TTL * 2 ** strikes), BACKOFF_MAX)
+        _backoff[url] = (time.time() + wait, strikes)
+        raise RateLimited(f"API limitou as consultas (429); nova tentativa às "
+                          f"{datetime.fromtimestamp(time.time() + wait):%H:%M}") from e
+    _backoff.pop(url, None)
+    return data
 
 
 def _err(e: Exception) -> str:
     # mensagens curtas; nunca incluem cabeçalhos (onde ficam os tokens)
+    if isinstance(e, RateLimited):
+        return str(e)[:200]
     return f"{type(e).__name__}: {e}"[:200]
 
 
