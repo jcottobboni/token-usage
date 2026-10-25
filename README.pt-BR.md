@@ -4,7 +4,7 @@
 
 Painel local que mostra quantos tokens você gastou nos agentes de IA de terminal e quanto ainda resta das cotas de cada plano.
 
-- **Um único arquivo Python**, só biblioteca padrão. Sem `pip install`, sem build.
+- **Um único arquivo Python**, só biblioteca padrão. Sem `pip install`, sem build. O ícone opcional na bandeja precisa de dois pacotes.
 - **100% local**: lê os arquivos que as próprias ferramentas já gravam no seu disco. O servidor escuta apenas em `127.0.0.1` e a página não carrega nada de fora.
 - **Mostra só o que você usa**: ferramentas não instaladas não aparecem na interface.
 
@@ -61,6 +61,25 @@ Crie um atalho na pasta de inicialização (`Win+R` → `shell:startup`) com o d
 ```
 pythonw.exe C:\caminho\para\token-usage\server.py
 ```
+
+### Ícone na barra superior / bandeja (opcional)
+
+`tray.py` coloca um ícone na barra superior (GNOME, KDE), na área de notificação do Windows ou na barra de menus do macOS. O anel mostra a menor cota restante entre todas as ferramentas. Ao clicar, abre um menu com cada cota, os tokens de hoje e do mês por ferramenta e **Abrir painel detalhado**. Se o `server.py` não estiver rodando, o ícone sobe o painel no mesmo processo.
+
+Precisa de `pystray` e Pillow. No Linux também precisa do PyGObject com AppIndicator; no GNOME, ative a extensão AppIndicator (já vem ativa no Ubuntu).
+
+```bash
+# Linux (Ubuntu/Debian)
+sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install -r requirements-tray.txt
+.venv/bin/python tray.py
+
+# iniciar junto com a sessão
+cp contrib/token-usage-tray.desktop ~/.config/autostart/
+```
+
+No Windows e no macOS: `pip install -r requirements-tray.txt` e rode `pythonw tray.py` (Windows) ou `python3 tray.py` (macOS). No Windows, o menu abre com o botão direito; o clique esquerdo abre o painel.
 
 ## Como os números são calculados
 
