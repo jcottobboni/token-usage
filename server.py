@@ -225,6 +225,21 @@ def _get_json(url: str, headers: dict, body: dict | None = None, context=None) -
         return json.load(res)
 
 
+# o que fazer quando a credencial guardada pela ferramenta não vale mais
+LOGIN_HINT = {
+    "claude": "login do Claude Code vencido: abra o claude e rode /login",
+    "copilot": "gh sem login válido: rode gh auth login",
+    "codex": "login do Codex vencido: rode codex login",
+}
+
+
+def _api_err(source: str, e: Exception) -> str:
+    code = getattr(e, "code", None)
+    if code in (401, 403) or isinstance(e, subprocess.CalledProcessError):
+        return f"{LOGIN_HINT[source]} ({_err(e)})"[:200]
+    return _err(e)
+
+
 def _err(e: Exception) -> str:
     # mensagens curtas; nunca incluem cabeçalhos (onde ficam os tokens)
     return f"{type(e).__name__}: {e}"[:200]
@@ -248,7 +263,7 @@ def claude_limits() -> dict:
                          {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
         return {"live": True, "fetched_at": time.time(), "limits": _claude_limits_from(util), "error": None}
     except Exception as e:  # noqa: BLE001
-        err = _err(e)
+        err = _api_err("claude", e)
     # sem API: usa o último valor que o próprio Claude Code guardou
     try:
         cached = json.loads(CLAUDE_STATE.read_text(encoding="utf-8")).get("cachedUsageUtilization") or {}
@@ -297,7 +312,7 @@ def copilot_limits() -> dict:
                 "fetched_at": time.time(), "unlimited": q.get("unlimited"), "plan": d.get("copilot_plan")}
         live, err = True, None
     except Exception as e:  # noqa: BLE001
-        snap, live, err = _copilot_snapshot(), False, _err(e)
+        snap, live, err = _copilot_snapshot(), False, _api_err("copilot", e)
     if not snap:
         return {"live": False, "fetched_at": None, "limits": [], "error": err}
     ent, used = snap["entitlement"] or 0, snap["used"] or 0
@@ -359,7 +374,7 @@ def codex_limits() -> dict:
                         "resets_at": _iso(reset)})
         return {"live": True, "fetched_at": time.time(), "limits": out, "error": None, "plan": d.get("plan_type")}
     except Exception as e:  # noqa: BLE001
-        err = _err(e)
+        err = _api_err("codex", e)
     snap = _codex_snapshot()
     if not snap:
         return {"live": False, "fetched_at": None, "limits": [], "error": err}
@@ -447,6 +462,20 @@ def installed() -> list[str]:
     return [k for k, v in found.items() if v]
 
 
+def _mark_stale(res: dict) -> dict:
+    """Cota de cache cuja janela já renovou: o uso atual é desconhecido, não zero."""
+    if not res.get("live"):
+        now = time.time()
+        for lim in res.get("limits") or []:
+            try:
+                reset = datetime.fromisoformat(lim["resets_at"].replace("Z", "+00:00")).timestamp()
+            except (KeyError, AttributeError, TypeError, ValueError):
+                continue
+            if reset < now:
+                lim["stale"] = True
+    return res
+
+
 def _safe(fn) -> dict:
     # uma ferramenta com formato inesperado não pode derrubar as outras
     try:
@@ -467,7 +496,8 @@ def limits(force: bool = False) -> dict:
         age = time.time() - _limits_cache[0] if _limits_cache else None
         if age is None or age > LIMITS_TTL or (force and age > LIMITS_MIN):
             # não consulta APIs de ferramentas que o usuário não usa
-            _limits_cache = (time.time(), {k: _safe(LIMIT_SOURCES[k]) for k in installed() if k in LIMIT_SOURCES})
+            _limits_cache = (time.time(), {k: _mark_stale(_safe(LIMIT_SOURCES[k]))
+                                           for k in installed() if k in LIMIT_SOURCES})
         return _limits_cache[1]
 
 

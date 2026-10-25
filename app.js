@@ -217,9 +217,20 @@ function renderLimits() {
         <div class="err">Sem dados de cota${L.error ? ': ' + esc(L.error) : ''}</div></div>`);
       continue;
     }
-    for (const lim of L.limits) {
-      // janela que já renovou desde a leitura do cache: o uso real é 0
+    L.limits.forEach((lim, i) => {
+      // ao vivo, janela que acabou de renovar tem uso 0; no cache, o uso atual é desconhecido
       const expired = lim.resets_at && new Date(lim.resets_at) < Date.now();
+      // o aviso de login/erro vai só no primeiro cartão da ferramenta
+      const warn = !L.live && L.error && i === 0 ? `<div class="meta err">${esc(L.error)}</div>` : '';
+      if (lim.stale || (expired && !L.live)) {
+        cards.push(`<div class="lim" title="${L.error ? 'API: ' + esc(L.error) : ''}">
+          <div class="src"><span class="tag" style="background:${C[src]}"></span>${LABEL[src]}</div>
+          <div class="top"><span class="name">${esc(lim.label)}</span><span class="pct">—<small> sem dado atual</small></span></div>
+          <div class="bar"></div>
+          <div class="meta"><span>a janela renovou depois da última leitura</span></div>
+          <div class="meta"><span>${status}</span></div>${warn}</div>`);
+        return;
+      }
       const used = expired ? 0 : Math.min(Math.max(+lim.used_pct || 0, 0), 100);
       const left = 100 - used;
       const count = lim.total ? `${Math.max(lim.total - lim.used, 0).toLocaleString('pt-BR')} de ${lim.total.toLocaleString('pt-BR')} restantes${lim.used > lim.total ? ` · ${lim.used - lim.total} acima` : ''}` : `${used.toFixed(0)}% usado`;
@@ -228,8 +239,8 @@ function renderLimits() {
         <div class="top"><span class="name">${esc(lim.label)}</span><span class="pct">${left.toFixed(left < 10 && left > 0 ? 1 : 0)}%<small> restante</small></span></div>
         <div class="bar"><i style="width:${left}%;background:${level(left)}"></i></div>
         <div class="meta"><span>${count}</span><span>${until(lim.resets_at)}</span></div>
-        <div class="meta"><span>${status}</span></div></div>`);
-    }
+        <div class="meta"><span>${status}</span></div>${warn}</div>`);
+    });
   }
   document.getElementById('limits').innerHTML = cards.join('');
   document.getElementById('limits-title').hidden = !cards.length;
