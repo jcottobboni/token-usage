@@ -16,7 +16,7 @@ Painel local que mostra quantos tokens você gastou nos agentes de IA de termina
 | GitHub Copilot CLI | `~/.copilot/session-store.db` | API do GitHub via `gh auth token` (fallback: `~/.copilot/session-state`) |
 | OpenAI Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` (respeita `CODEX_HOME`) | API do ChatGPT usada pelo `/status` (fallback: último `rate_limits` gravado nos rollouts) |
 | Gemini CLI | `~/.gemini/tmp/*/chats/*.json` e `*.jsonl` | — |
-| Google Antigravity | Antigravity CLI (`agy`): `~/.gemini/antigravity-cli/conversations/*.db`. O app não grava conversas legíveis | language server local do Antigravity, só com o app aberto (o `agy` guarda o token só em memória, então o CLI fica sem cota) |
+| Google Antigravity | Antigravity CLI (`agy`): `~/.gemini/antigravity-cli/conversations/*.db`. O app não grava conversas legíveis | language server local do Antigravity, só com o app aberto; sem o app, `agy -p /usage --output-format json` (comando local, não gasta tokens) |
 
 O que o painel mostra:
 

@@ -33,6 +33,8 @@ ANTIGRAVITY_DIR = HOME / ".gemini" / "antigravity"
 AGY_DIR = HOME / ".gemini" / "antigravity-cli"  # Antigravity CLI (agy)
 AGY_CONVERSATIONS = AGY_DIR / "conversations"
 AGY_HISTORY = AGY_DIR / "history.jsonl"
+AGY = shutil.which("agy") or str(HOME / ".local" / "bin" / "agy")  # systemd não tem ~/.local/bin no PATH
+AGY_TTL = 300  # o /usage do agy leva alguns segundos; consulta com menos frequência
 HERE = Path(__file__).resolve().parent
 HOST, PORT = "127.0.0.1", int(os.environ.get("TOKEN_USAGE_PORT", "8777"))
 CLAUDE_STATE = HOME / ".claude.json"
@@ -556,16 +558,40 @@ def _listening_ports(pid: int) -> list[int]:
     return ports
 
 
+_agy_cache: tuple[float, dict] | None = None
+
+
+def _agy_limits() -> dict:
+    """Cota pelo `agy -p /usage --output-format json`: comando local, não gasta tokens.
+    O agy guarda o token CSRF do language server só em memória, então não dá para ir direto nele."""
+    global _agy_cache
+    if _agy_cache and time.time() - _agy_cache[0] < AGY_TTL:
+        return _agy_cache[1]
+    try:
+        out = subprocess.run([AGY, "-p", "/usage", "--output-format", "json"], capture_output=True, text=True,
+                             timeout=60, check=True, stdin=subprocess.DEVNULL).stdout
+        cmd = json.loads(out).get("command") or {}
+        labels = {"weekly": "semanal", "5h": "sessão (5 h)"}
+        lims = [{"label": f"{g.get('name') or '?'} · {labels.get(b.get('window'), b.get('name') or '?')}",
+                 "used_pct": (1 - (b.get("remaining_fraction") or 0)) * 100, "resets_at": b.get("reset_time")}
+                for g in (cmd.get("data") or {}).get("groups") or [] for b in g.get("buckets") or []]
+        res = {"live": True, "fetched_at": time.time(), "limits": lims, "error": None if lims else "agy /usage sem cotas"}
+    except Exception as e:  # noqa: BLE001
+        res = {"live": False, "fetched_at": None, "limits": [], "error": f"agy /usage: {_err(e)}"}
+    _agy_cache = (time.time(), res)
+    return res
+
+
 def antigravity_limits() -> dict:
     if not sys.platform.startswith("linux"):
+        if os.access(AGY, os.X_OK):
+            return _agy_limits()
         # a descoberta do language server usa /proc e ss
         return {"live": False, "fetched_at": None, "limits": [], "error": "cota do Antigravity só é lida no Linux"}
     srv = _antigravity_server()
     if not srv:
-        if AGY_DIR.is_dir() and not _antigravity_app_installed():
-            # o agy sobe o language server dentro do próprio processo e guarda o token CSRF só em memória
-            return {"live": False, "fetched_at": None, "limits": [],
-                    "error": "o Antigravity CLI (agy) não expõe a cota localmente; abra o app Antigravity"}
+        if os.access(AGY, os.X_OK):
+            return _agy_limits()
         return {"live": False, "fetched_at": None, "limits": [], "error": "Antigravity não está aberto"}
     pid, csrf = srv
     # o language server usa certificado autoassinado; a conexão nunca sai de 127.0.0.1

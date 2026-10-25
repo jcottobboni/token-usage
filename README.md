@@ -16,7 +16,7 @@ A local dashboard that shows how many tokens you spent on terminal AI coding age
 | GitHub Copilot CLI | `~/.copilot/session-store.db` | GitHub API via `gh auth token` (fallback: `~/.copilot/session-state`) |
 | OpenAI Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` (honors `CODEX_HOME`) | ChatGPT API used by `/status` (fallback: last `rate_limits` saved in the rollouts) |
 | Gemini CLI | `~/.gemini/tmp/*/chats/*.json` and `*.jsonl` | — |
-| Google Antigravity | Antigravity CLI (`agy`): `~/.gemini/antigravity-cli/conversations/*.db`. The app does not store conversations in a readable format | Antigravity's local language server, only while the app is open (`agy` keeps its token in memory, so no quota for the CLI) |
+| Google Antigravity | Antigravity CLI (`agy`): `~/.gemini/antigravity-cli/conversations/*.db`. The app does not store conversations in a readable format | Antigravity's local language server, only while the app is open; without the app, `agy -p /usage --output-format json` (local command, no tokens spent) |
 
 What the dashboard shows:
 
