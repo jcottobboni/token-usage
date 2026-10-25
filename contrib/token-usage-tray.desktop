@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Token Usage
+Comment=AI agent token usage and quotas in the top bar
+# ajuste o caminho para onde você clonou o repositório
+Exec=sh -c "exec \\$HOME/token-usage/.venv/bin/python -W ignore \\$HOME/token-usage/tray.py"
+Icon=utilities-system-monitor
+Terminal=false
+X-GNOME-Autostart-enabled=true
