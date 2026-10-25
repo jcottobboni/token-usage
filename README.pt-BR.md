@@ -15,8 +15,8 @@ Painel local que mostra quantos tokens você gastou nos agentes de IA de termina
 | Claude Code | `~/.claude/projects/**/*.jsonl` | API OAuth do Claude Code (fallback: cache em `~/.claude.json`) |
 | GitHub Copilot CLI | `~/.copilot/session-store.db` | API do GitHub via `gh auth token` (fallback: `~/.copilot/session-state`) |
 | OpenAI Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` (respeita `CODEX_HOME`) | API do ChatGPT usada pelo `/status` (fallback: último `rate_limits` gravado nos rollouts) |
-| Gemini CLI | `~/.gemini/tmp/*/chats/*.json` | — |
-| Google Antigravity | — (conversas não ficam legíveis em disco) | language server local do Antigravity, só com o app aberto |
+| Gemini CLI | `~/.gemini/tmp/*/chats/*.json` e `*.jsonl` | — |
+| Google Antigravity | Antigravity CLI (`agy`): `~/.gemini/antigravity-cli/conversations/*.db`. O app não grava conversas legíveis | language server local do Antigravity, só com o app aberto; sem o app, `agy -p /usage --output-format json` (comando local, não gasta tokens) |
 
 O que o painel mostra:
 
@@ -111,7 +111,7 @@ No Windows e no macOS: `pip install -r requirements-tray.txt` e rode `pythonw tr
 - Codex, Gemini e Antigravity foram implementados a partir dos formatos conhecidos dessas ferramentas. Se uma versão nova mudar o formato, abra uma issue com um trecho anonimizado do arquivo.
 - O suporte a macOS e Windows segue os caminhos padrão das ferramentas, mas foi testado só no Linux.
 - Gemini CLI antigo grava só o hash do projeto; nesse caso o projeto aparece como `gemini:<hash>`.
-- Antigravity não grava tokens em formato legível, então só a cota aparece.
+- O app Antigravity não grava tokens em formato legível, então só a cota aparece. O Antigravity CLI (`agy`) grava um protobuf por resposta em SQLite; o painel decodifica os campos de uso sem schema (mesmo layout `ModelUsageStats` do language server do Windsurf/Codeium), então uma versão nova do `agy` pode quebrar a leitura. O projeto vem do `history.jsonl`; conversas que não estão lá aparecem como `antigravity:<projeto do agy>`.
 
 ## Licença
 

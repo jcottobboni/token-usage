@@ -30,6 +30,11 @@ CODEX_SESSIONS = CODEX_HOME / "sessions"
 CODEX_AUTH = CODEX_HOME / "auth.json"
 GEMINI_TMP = HOME / ".gemini" / "tmp"
 ANTIGRAVITY_DIR = HOME / ".gemini" / "antigravity"
+AGY_DIR = HOME / ".gemini" / "antigravity-cli"  # Antigravity CLI (agy)
+AGY_CONVERSATIONS = AGY_DIR / "conversations"
+AGY_HISTORY = AGY_DIR / "history.jsonl"
+AGY = shutil.which("agy") or str(HOME / ".local" / "bin" / "agy")  # systemd não tem ~/.local/bin no PATH
+AGY_TTL = 300  # o /usage do agy leva alguns segundos; consulta com menos frequência
 HERE = Path(__file__).resolve().parent
 HOST, PORT = "127.0.0.1", int(os.environ.get("TOKEN_USAGE_PORT", "8777"))
 CLAUDE_STATE = HOME / ".claude.json"
@@ -71,23 +76,28 @@ def record(day, source, model, project, session, inp=0, outp=0, cr=0, cw=0, prem
             "requests": 1, "premium": premium}
 
 
-def cached_records(paths, parser, seen: set) -> dict:
+def _stat_sig(path: Path) -> tuple[float, int]:
+    st = path.stat()
+    return st.st_mtime, st.st_size
+
+
+def cached_records(paths, parser, seen: set, sig=_stat_sig) -> dict:
     """Reparseia só arquivos que mudaram; deduplica pelas chaves que o parser devolve."""
     out = {}
     for path in paths:
         p = str(path)
         seen.add(p)
         try:
-            st = path.stat()
+            mtime, size = sig(path)
         except OSError:
             continue
         cached = _file_cache.get(p)
-        if not cached or cached[0] != st.st_mtime or cached[1] != st.st_size:
+        if not cached or cached[0] != mtime or cached[1] != size:
             try:
-                cached = (st.st_mtime, st.st_size, parser(path))
-            except (OSError, ValueError) as e:
+                cached = (mtime, size, parser(path))
+            except (OSError, ValueError, sqlite3.Error) as e:
                 print(f"ignorando {p}: {e}", file=sys.stderr, flush=True)
-                cached = (st.st_mtime, st.st_size, {})
+                cached = (mtime, size, {})
             _file_cache[p] = cached
         out.update(cached[2])
     return out
@@ -171,9 +181,28 @@ def _gemini_project(chat_dir: Path) -> str:
         return f"gemini:{name[:12]}" if re.fullmatch(r"[0-9a-f]{64}", name) else name
 
 
+def _gemini_jsonl(path: Path) -> dict:
+    """Formato novo: 1ª linha com metadados da sessão, depois uma linha por mensagem.
+    A mesma mensagem é regravada quando atualizada; a última versão vale."""
+    session, messages = path.stem, {}
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if "sessionId" in d and "id" not in d:
+                session = d["sessionId"]
+            elif d.get("id"):
+                messages[d["id"]] = d
+    return {"sessionId": session, "messages": list(messages.values())}
+
+
 def parse_gemini_file(path: Path) -> dict:
     recs = {}
-    d = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    d = _gemini_jsonl(path) if path.suffix == ".jsonl" else json.loads(path.read_text(encoding="utf-8", errors="replace"))
     session = d.get("sessionId") or path.stem
     project = _gemini_project(path.parent)
     for m in d.get("messages") or []:
@@ -188,10 +217,140 @@ def parse_gemini_file(path: Path) -> dict:
     return recs
 
 
+def _gemini_chats():
+    # versões antigas gravam um .json por sessão; as novas, .jsonl
+    return [*GEMINI_TMP.glob("*/chats/*.json"), *GEMINI_TMP.glob("*/chats/*.jsonl")]
+
+
 def gemini_records(seen: set) -> list[dict]:
     if not GEMINI_TMP.is_dir():
         return []
-    return list(cached_records(GEMINI_TMP.glob("*/chats/*.json"), parse_gemini_file, seen).values())
+    return list(cached_records(_gemini_chats(), parse_gemini_file, seen).values())
+
+
+def _pb_varint(b: bytes, i: int) -> tuple[int, int]:
+    r = shift = 0
+    while True:
+        c = b[i]
+        i += 1
+        r |= (c & 0x7F) << shift
+        shift += 7
+        if c < 0x80:
+            return r, i
+
+
+def _pb_fields(b: bytes) -> dict:
+    """Decodifica um nível de protobuf sem schema: {campo: [valores]} (int ou bytes)."""
+    i, out = 0, {}
+    try:
+        while i < len(b):
+            key, i = _pb_varint(b, i)
+            wire = key & 7
+            if wire == 0:
+                v, i = _pb_varint(b, i)
+            elif wire == 1:
+                v, i = b[i:i + 8], i + 8
+            elif wire == 5:
+                v, i = b[i:i + 4], i + 4
+            elif wire == 2:
+                n, i = _pb_varint(b, i)
+                v, i = b[i:i + n], i + n
+            else:
+                raise ValueError(f"wire type {wire}")
+            out.setdefault(key >> 3, []).append(v)
+    except IndexError as e:
+        raise ValueError("protobuf truncado") from e
+    return out
+
+
+def _pb_get(msg: dict, *path, default=None):
+    """Segue campos aninhados (primeira ocorrência de cada um)."""
+    v = None
+    for n, f in enumerate(path):
+        if f not in msg:
+            return default
+        v = msg[f][0]
+        if n < len(path) - 1:
+            if not isinstance(v, bytes):
+                return default
+            msg = _pb_fields(v)
+    return v
+
+
+def _agy_workspaces() -> dict:
+    """conversationId -> diretório de trabalho, a partir do histórico de prompts do agy."""
+    out = {}
+    try:
+        with AGY_HISTORY.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("conversationId") and d.get("workspace"):
+                    out[d["conversationId"]] = d["workspace"]
+    except OSError:
+        pass
+    return out
+
+
+def _agy_sig(path: Path) -> tuple[float, int]:
+    # SQLite em modo WAL: as escritas recentes ficam no -wal antes do checkpoint
+    mtime, size = _stat_sig(path)
+    try:
+        wal_mtime, wal_size = _stat_sig(path.with_name(path.name + "-wal"))
+        return max(mtime, wal_mtime), size + wal_size
+    except OSError:
+        return mtime, size
+
+
+def parse_agy_file(path: Path, workspaces: dict) -> dict:
+    """Conversa do Antigravity CLI: SQLite com um protobuf por resposta em gen_metadata.
+
+    Campos usados (mesmo ModelUsageStats do language server do Windsurf/Codeium):
+      1.4  = uso: 2 input (sem cache), 3 output (inclui raciocínio), 4 cache gravado, 5 cache lido, 11 response id
+      1.9.4.1 = horário da resposta (epoch s); 1.19 = id do modelo
+    """
+    recs = {}
+    session = path.stem
+    con = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
+    try:
+        meta = con.execute("select data from trajectory_metadata_blob").fetchone()
+        rows = con.execute("select idx, data from gen_metadata order by idx").fetchall()
+    finally:
+        con.close()
+    meta = _pb_fields(meta[0]) if meta and meta[0] else {}
+    # respostas sem horário próprio herdam o da anterior; a primeira, o início da conversa
+    last_ts = _pb_get(meta, 2, 1) or 0
+    agy_project = (_pb_get(meta, 18) or b"").decode(errors="replace")
+    project = project_name(workspaces.get(session), f"antigravity:{agy_project or '?'}")
+    for idx, data in rows:
+        gen = _pb_get(_pb_fields(data or b""), 1)
+        if not isinstance(gen, bytes):
+            continue
+        gen = _pb_fields(gen)
+        u = _pb_get(gen, 4)
+        if not isinstance(u, bytes):
+            continue
+        u = _pb_fields(u)
+        last_ts = _pb_get(gen, 9, 4, 1) or last_ts
+        if not last_ts:
+            continue
+        num = {f: v if isinstance(v := _pb_get(u, f, default=0), int) else 0 for f in (2, 3, 4, 5)}
+        model = (_pb_get(gen, 19) or _pb_get(gen, 21) or b"antigravity").decode(errors="replace")
+        rid = (_pb_get(u, 11) or b"").decode(errors="replace") or f"{session}:{idx}"
+        day = datetime.fromtimestamp(last_ts, timezone.utc).astimezone().strftime("%Y-%m-%d")
+        recs[("antigravity", rid)] = record(day, "antigravity", model, project, session,
+                                            num[2], num[3], num[5], num[4])
+    return recs
+
+
+def antigravity_records(seen: set) -> list[dict]:
+    if not AGY_CONVERSATIONS.is_dir():
+        return []
+    workspaces = _agy_workspaces()
+    return list(cached_records(AGY_CONVERSATIONS.glob("*.db"), lambda p: parse_agy_file(p, workspaces),
+                               seen, sig=_agy_sig).values())
 
 
 def copilot_records() -> list[dict]:
@@ -399,12 +558,40 @@ def _listening_ports(pid: int) -> list[int]:
     return ports
 
 
+_agy_cache: tuple[float, dict] | None = None
+
+
+def _agy_limits() -> dict:
+    """Cota pelo `agy -p /usage --output-format json`: comando local, não gasta tokens.
+    O agy guarda o token CSRF do language server só em memória, então não dá para ir direto nele."""
+    global _agy_cache
+    if _agy_cache and time.time() - _agy_cache[0] < AGY_TTL:
+        return _agy_cache[1]
+    try:
+        out = subprocess.run([AGY, "-p", "/usage", "--output-format", "json"], capture_output=True, text=True,
+                             timeout=60, check=True, stdin=subprocess.DEVNULL).stdout
+        cmd = json.loads(out).get("command") or {}
+        labels = {"weekly": "semanal", "5h": "sessão (5 h)"}
+        lims = [{"label": f"{g.get('name') or '?'} · {labels.get(b.get('window'), b.get('name') or '?')}",
+                 "used_pct": (1 - (b.get("remaining_fraction") or 0)) * 100, "resets_at": b.get("reset_time")}
+                for g in (cmd.get("data") or {}).get("groups") or [] for b in g.get("buckets") or []]
+        res = {"live": True, "fetched_at": time.time(), "limits": lims, "error": None if lims else "agy /usage sem cotas"}
+    except Exception as e:  # noqa: BLE001
+        res = {"live": False, "fetched_at": None, "limits": [], "error": f"agy /usage: {_err(e)}"}
+    _agy_cache = (time.time(), res)
+    return res
+
+
 def antigravity_limits() -> dict:
     if not sys.platform.startswith("linux"):
+        if os.access(AGY, os.X_OK):
+            return _agy_limits()
         # a descoberta do language server usa /proc e ss
         return {"live": False, "fetched_at": None, "limits": [], "error": "cota do Antigravity só é lida no Linux"}
     srv = _antigravity_server()
     if not srv:
+        if os.access(AGY, os.X_OK):
+            return _agy_limits()
         return {"live": False, "fetched_at": None, "limits": [], "error": "Antigravity não está aberto"}
     pid, csrf = srv
     # o language server usa certificado autoassinado; a conexão nunca sai de 127.0.0.1
@@ -434,6 +621,10 @@ def antigravity_limits() -> dict:
     return {"live": False, "fetched_at": None, "limits": [], "error": err}
 
 
+def _antigravity_app_installed() -> bool:
+    return ANTIGRAVITY_DIR.is_dir() or (HOME / ".config" / "Antigravity").is_dir()
+
+
 def installed() -> list[str]:
     """Ferramentas com dados nesta máquina; a interface só mostra estas."""
     found = {
@@ -441,8 +632,8 @@ def installed() -> list[str]:
         "copilot": COPILOT_DB.exists() or COPILOT_STATE.is_dir(),
         "codex": CODEX_SESSIONS.is_dir() or CODEX_AUTH.exists(),
         # ~/.gemini também é criado pelo Antigravity; só conta com chats do Gemini CLI
-        "gemini": any(GEMINI_TMP.glob("*/chats/*.json")),
-        "antigravity": ANTIGRAVITY_DIR.is_dir() or (HOME / ".config" / "Antigravity").is_dir(),
+        "gemini": GEMINI_TMP.is_dir() and bool(_gemini_chats()),
+        "antigravity": _antigravity_app_installed() or AGY_DIR.is_dir(),
     }
     return [k for k, v in found.items() if v]
 
@@ -477,7 +668,8 @@ def aggregate() -> dict:
     seen: set[str] = set()
     # ThreadingHTTPServer: requisições simultâneas não podem mexer no cache ao mesmo tempo
     with _records_lock:
-        recs = claude_records(seen) + copilot_records() + codex_records(seen) + gemini_records(seen)
+        recs = (claude_records(seen) + copilot_records() + codex_records(seen) + gemini_records(seen)
+                + antigravity_records(seen))
         for p in set(_file_cache) - seen:
             del _file_cache[p]
     for r in recs:

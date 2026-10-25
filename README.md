@@ -15,8 +15,8 @@ A local dashboard that shows how many tokens you spent on terminal AI coding age
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Claude Code OAuth API (fallback: cache in `~/.claude.json`) |
 | GitHub Copilot CLI | `~/.copilot/session-store.db` | GitHub API via `gh auth token` (fallback: `~/.copilot/session-state`) |
 | OpenAI Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` (honors `CODEX_HOME`) | ChatGPT API used by `/status` (fallback: last `rate_limits` saved in the rollouts) |
-| Gemini CLI | `~/.gemini/tmp/*/chats/*.json` | — |
-| Google Antigravity | — (conversations are not stored in a readable format) | Antigravity's local language server, only while the app is open |
+| Gemini CLI | `~/.gemini/tmp/*/chats/*.json` and `*.jsonl` | — |
+| Google Antigravity | Antigravity CLI (`agy`): `~/.gemini/antigravity-cli/conversations/*.db`. The app does not store conversations in a readable format | Antigravity's local language server, only while the app is open; without the app, `agy -p /usage --output-format json` (local command, no tokens spent) |
 
 What the dashboard shows:
 
@@ -111,7 +111,7 @@ On Windows and macOS: `pip install -r requirements-tray.txt` and run `pythonw tr
 - Codex, Gemini and Antigravity support is based on the known file formats of those tools. If a new version changes the format, open an issue with an anonymized snippet of the file.
 - macOS and Windows support follows the tools' default paths, but it was tested on Linux only.
 - Older Gemini CLI versions store only a hash of the project path; such projects show up as `gemini:<hash>`.
-- Antigravity does not store tokens in a readable format, so only its quota is shown.
+- The Antigravity app does not store tokens in a readable format, so only its quota is shown. The Antigravity CLI (`agy`) stores one protobuf per response in SQLite; the dashboard decodes the usage fields without a schema (same `ModelUsageStats` layout as the Windsurf/Codeium language server), so a new `agy` version may break it. The project comes from `history.jsonl`; conversations not listed there show up as `antigravity:<agy project>`.
 
 ## License
 
