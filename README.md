@@ -4,7 +4,7 @@
 
 A local dashboard that shows how many tokens you spent on terminal AI coding agents and how much of each plan's quota is left.
 
-- **A single Python file**, standard library only. No `pip install`, no build step.
+- **A single Python file**, standard library only. No `pip install`, no build step. The optional tray icon needs two packages.
 - **100% local**: it reads the files the tools already write to your disk. The server listens only on `127.0.0.1`, and the page loads nothing from the internet.
 - **Shows only what you use**: tools that are not installed do not appear in the UI.
 
@@ -61,6 +61,25 @@ Create a shortcut in the startup folder (`Win+R` → `shell:startup`) with the t
 ```
 pythonw.exe C:\path\to\token-usage\server.py
 ```
+
+### Top bar / system tray icon (optional)
+
+`tray.py` adds an icon to the top bar (GNOME, KDE), the Windows notification area or the macOS menu bar. The ring shows the lowest remaining quota across all tools. Clicking it opens a menu with each quota, today's and this month's tokens per tool, and **Open detailed dashboard**. If `server.py` is not running, the icon starts it in the same process.
+
+It needs `pystray` and Pillow. On Linux it also needs PyGObject with AppIndicator; on GNOME, enable the AppIndicator extension (already on by default in Ubuntu).
+
+```bash
+# Linux (Ubuntu/Debian)
+sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install -r requirements-tray.txt
+.venv/bin/python tray.py
+
+# start with the session
+cp contrib/token-usage-tray.desktop ~/.config/autostart/
+```
+
+On Windows and macOS: `pip install -r requirements-tray.txt` and run `pythonw tray.py` (Windows) or `python3 tray.py` (macOS). On Windows, right-click the icon for the menu; left-click opens the dashboard.
 
 ## How the numbers are computed
 
