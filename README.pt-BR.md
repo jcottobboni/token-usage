@@ -4,7 +4,7 @@
 
 Painel local que mostra quantos tokens você gastou nos agentes de IA de terminal e quanto ainda resta das cotas de cada plano.
 
-- **Um único arquivo Python**, só biblioteca padrão. Sem `pip install`, sem build. O ícone opcional na bandeja precisa de dois pacotes.
+- **Só biblioteca padrão do Python** no painel: nenhuma dependência para instalar. O ícone opcional na bandeja precisa de dois pacotes.
 - **100% local**: lê os arquivos que as próprias ferramentas já gravam no seu disco. O servidor escuta apenas em `127.0.0.1` e a página não carrega nada de fora.
 - **Mostra só o que você usa**: ferramentas não instaladas não aparecem na interface.
 
@@ -25,12 +25,68 @@ O que o painel mostra:
 
 ## Requisitos
 
-- Python 3.10+
-- Linux, macOS ou Windows. A cota do Antigravity depende de `/proc` e `ss`, então só funciona no Linux.
+- Linux, macOS ou Windows. A cota do app Antigravity depende de `/proc` e `ss`, então só funciona no Linux.
+- Python 3.10+, a menos que você use os [executáveis prontos](#executáveis-prontos).
 - Opcional: [`gh`](https://cli.github.com/) autenticado, para a cota do Copilot ao vivo.
 - No macOS, o Claude Code guarda o token no Keychain. Nesse caso, a cota do Claude vem do último valor salvo em `~/.claude.json`.
 
-## Uso
+## Instalação
+
+Os scripts de instalação criam um virtualenv próprio (`~/.local/share/token-usage` ou `%LOCALAPPDATA%\token-usage`) e colocam o comando `token-usage` no PATH.
+
+**Linux e macOS**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leoalmeidasa/token-usage/main/install.sh | sh
+```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/leoalmeidasa/token-usage/main/install.ps1 | iex
+```
+
+Opções:
+
+| `install.sh` | `install.ps1` | O que faz |
+|---|---|---|
+| `--tray` | `-Tray` | Instala também o [ícone na bandeja](#ícone-na-barra-superior--bandeja). No Windows, cria o atalho **Token Usage** no menu Iniciar. |
+| `--autostart` | `-Autostart` | Inicia com a sessão: o ícone com `--tray`; senão, o painel. |
+| `--uninstall` | `-Uninstall` | Remove tudo o que o script instalou. |
+
+Para passar opções pelo pipe:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leoalmeidasa/token-usage/main/install.sh | sh -s -- --tray --autostart
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/leoalmeidasa/token-usage/main/install.ps1))) -Tray -Autostart
+```
+
+No Linux, `--tray` precisa do PyGObject com AppIndicator da distro. Se faltar, o script diz qual pacote instalar (Ubuntu/Debian: `sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1`).
+
+### Com pipx ou uv
+
+```bash
+pipx install "token-usage[tray] @ https://github.com/leoalmeidasa/token-usage/archive/refs/heads/main.zip"
+# ou
+uv tool install "token-usage[tray] @ https://github.com/leoalmeidasa/token-usage/archive/refs/heads/main.zip"
+```
+
+Tire o `[tray]` se quiser só o painel. No Linux, o ícone precisa do PyGObject da distro: use `pipx install --system-site-packages ...`.
+
+### Executáveis prontos
+
+Cada [release](https://github.com/leoalmeidasa/token-usage/releases) traz executáveis que não precisam de Python:
+
+- `token-usage-linux-x86_64`: só o painel. Para o ícone no Linux, use `install.sh --tray`.
+- `token-usage-macos-arm64`: painel e ícone (`token-usage-macos-arm64 tray`).
+- `token-usage-windows-x86_64.zip`: `token-usage.exe` (linha de comando) e `token-usage-tray.exe` (ícone, sem janela de console).
+
+Os executáveis não são assinados. No macOS, rode `xattr -d com.apple.quarantine token-usage-macos-arm64` antes da primeira execução. No Windows, o SmartScreen pode pedir confirmação.
+
+### A partir do clone
 
 ```bash
 git clone https://github.com/leoalmeidasa/token-usage.git
@@ -38,50 +94,29 @@ cd token-usage
 python3 server.py --open
 ```
 
-Abre em <http://127.0.0.1:8777/>. Para outra porta: `TOKEN_USAGE_PORT=9000 python3 server.py`.
+## Uso
+
+```bash
+token-usage --open          # painel em http://127.0.0.1:8777/, abre o navegador
+token-usage tray            # ícone na bandeja / barra superior
+token-usage autostart       # inicia o painel com a sessão (--tray para o ícone, --remove para desfazer)
+```
+
+Para outra porta: `TOKEN_USAGE_PORT=9000 token-usage`.
 
 A página atualiza sozinha a cada 60 s (cotas a cada 30 s).
 
-No Windows, use `py server.py --open` no PowerShell. As pastas `~/.claude`, `~/.copilot` etc. ficam em `%USERPROFILE%`.
+No Windows, as pastas `~/.claude`, `~/.copilot` etc. ficam em `%USERPROFILE%`.
 
-### Rodar como serviço (systemd, usuário)
+O `token-usage autostart` usa um serviço systemd de usuário para o painel e `~/.config/autostart` para o ícone no Linux, um LaunchAgent no macOS e a chave de registro `HKCU\...\Run` no Windows. Vale a partir do próximo login.
 
-```bash
-mkdir -p ~/.config/systemd/user
-cp contrib/token-usage.service ~/.config/systemd/user/
-# edite ExecStart se o repositório não estiver em ~/token-usage
-systemctl --user daemon-reload
-systemctl --user enable --now token-usage
-```
+### Ícone na barra superior / bandeja
 
-### Iniciar com o Windows
-
-Crie um atalho na pasta de inicialização (`Win+R` → `shell:startup`) com o destino abaixo. `pythonw` roda sem abrir janela.
-
-```
-pythonw.exe C:\caminho\para\token-usage\server.py
-```
-
-### Ícone na barra superior / bandeja (opcional)
-
-`tray.py` coloca um ícone na barra superior (GNOME, KDE), na área de notificação do Windows ou na barra de menus do macOS. O anel mostra a menor cota restante entre todas as ferramentas. Ao clicar, abre um menu com cada cota, os tokens de hoje e do mês por ferramenta e **Abrir painel detalhado**. Se o `server.py` não estiver rodando, o ícone sobe o painel no mesmo processo.
+`token-usage tray` coloca um ícone na barra superior (GNOME, KDE), na área de notificação do Windows ou na barra de menus do macOS. O anel mostra a menor cota restante entre todas as ferramentas. Ao clicar, abre um menu com cada cota, os tokens de hoje e do mês por ferramenta e **Abrir painel detalhado**. Se o painel não estiver rodando, o ícone sobe o painel no mesmo processo.
 
 Em **Mostrar na barra** você escolhe uma cota para aparecer em texto ao lado do ícone (por exemplo `Claude 2%`), em % usado ou restante. A escolha fica em `~/.config/token-usage/tray.json` (`%APPDATA%\token-usage\tray.json` no Windows). No Windows, onde a bandeja não aceita texto, o número aparece dentro do anel.
 
-Precisa de `pystray` e Pillow. No Linux também precisa do PyGObject com AppIndicator; no GNOME, ative a extensão AppIndicator (já vem ativa no Ubuntu).
-
-```bash
-# Linux (Ubuntu/Debian)
-sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install -r requirements-tray.txt
-.venv/bin/python tray.py
-
-# iniciar junto com a sessão
-cp contrib/token-usage-tray.desktop ~/.config/autostart/
-```
-
-No Windows e no macOS: `pip install -r requirements-tray.txt` e rode `pythonw tray.py` (Windows) ou `python3 tray.py` (macOS). No Windows, o menu abre com o botão direito; o clique esquerdo abre o painel.
+Precisa de `pystray` e Pillow (`token-usage[tray]`). No Linux também precisa do PyGObject com AppIndicator; no GNOME, ative a extensão AppIndicator (já vem ativa no Ubuntu). No Windows, o menu abre com o botão direito; o clique esquerdo abre o painel.
 
 ## Como os números são calculados
 
@@ -115,4 +150,4 @@ No Windows e no macOS: `pip install -r requirements-tray.txt` e rode `pythonw tr
 
 ## Licença
 
-[MIT](LICENSE). Chart.js 4.4.1 (MIT) está incluído em `vendor/`. Veja `vendor/LICENSE-chartjs.md`.
+[MIT](LICENSE). Chart.js 4.4.1 (MIT) está incluído em `token_usage/vendor/`. Veja `token_usage/vendor/LICENSE-chartjs.md`.
