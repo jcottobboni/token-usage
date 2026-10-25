@@ -88,7 +88,9 @@ def until(iso: str | None) -> str:
     return f"renova em {d} d {h} h" if d else f"renova em {h} h {m:02d} min"
 
 
-def remaining(lim: dict) -> float:
+def remaining(lim: dict) -> float | None:
+    if lim.get("stale"):
+        return None  # cache de uma janela que já renovou: o uso atual é desconhecido
     reset = lim.get("resets_at")
     # janela que já renovou desde a leitura do cache: o uso real é 0
     if reset and datetime.fromisoformat(reset.replace("Z", "+00:00")) < datetime.now().astimezone():
@@ -97,7 +99,7 @@ def remaining(lim: dict) -> float:
 
 
 def lowest() -> float | None:
-    vals = [remaining(lim) for L in state["limits"].values() for lim in L.get("limits") or []]
+    vals = [v for L in state["limits"].values() for lim in L.get("limits") or [] if (v := remaining(lim)) is not None]
     return min(vals) if vals else None
 
 
@@ -212,9 +214,15 @@ def menu_items():
         items.append(info(f"Erro: {state['error'][:80]}"))
     for src, L in state["limits"].items():
         for lim in L.get("limits") or []:
+            left = remaining(lim)
+            if left is None:
+                items.append(info(f"{LABEL.get(src, src)} · {lim['label']}: sem dado atual"))
+                continue
             extra = until(lim.get("resets_at"))
-            items.append(info(f"{LABEL.get(src, src)} · {lim['label']}: {remaining(lim):.0f}% restante"
+            items.append(info(f"{LABEL.get(src, src)} · {lim['label']}: {left:.0f}% restante"
                               + (f" · {extra}" if extra else "")))
+        if not L.get("live") and L.get("error"):
+            items.append(info(f"{LABEL.get(src, src)}: {L['error'][:90]}"))
     lines = usage_lines()
     if lines:
         items += [pystray.Menu.SEPARATOR, info("Tokens processados"), *map(info, lines)]
