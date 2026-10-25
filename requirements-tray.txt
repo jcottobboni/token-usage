@@ -1,3 +1,0 @@
-# só para o ícone na bandeja (tray.py); o painel (server.py) não precisa de nada
-pystray>=0.19.5
-Pillow>=10.1  # ImageFont.load_default(size=)
