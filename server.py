@@ -458,22 +458,31 @@ def _claude_limits_from(util: dict) -> list[dict]:
     return out
 
 
+_claude_last: tuple[float, dict] | None = None  # (fetched_at, resposta) da última leitura ao vivo
+
+
 def claude_limits() -> dict:
+    global _claude_last
     try:
         # o Claude Code renova o token e regrava o arquivo; relê a cada consulta
         token = json.loads(CLAUDE_CREDS.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
         util = _get_json("https://api.anthropic.com/api/oauth/usage",
                          {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
-        return {"live": True, "fetched_at": time.time(), "limits": _claude_limits_from(util), "error": None}
+        _claude_last = (time.time(), util)
+        return {"live": True, "fetched_at": _claude_last[0], "limits": _claude_limits_from(util), "error": None}
     except Exception as e:  # noqa: BLE001
         err = _api_err("claude", e)
-    # sem API: usa o último valor que o próprio Claude Code guardou
+    # sem API: a leitura mais recente entre a última ao vivo e a que o próprio Claude Code guardou
     try:
         cached = json.loads(CLAUDE_STATE.read_text(encoding="utf-8")).get("cachedUsageUtilization") or {}
-        return {"live": False, "fetched_at": (cached.get("fetchedAtMs") or 0) / 1000,
-                "limits": _claude_limits_from(cached.get("utilization") or {}), "error": err}
+        fetched, util = (cached.get("fetchedAtMs") or 0) / 1000, cached.get("utilization") or {}
     except Exception as e:  # noqa: BLE001
-        return {"live": False, "fetched_at": None, "limits": [], "error": f"{err}; cache: {_err(e)}"}
+        if not _claude_last:
+            return {"live": False, "fetched_at": None, "limits": [], "error": f"{err}; cache: {_err(e)}"}
+        fetched, util = 0, {}
+    if _claude_last and _claude_last[0] > fetched:
+        fetched, util = _claude_last
+    return {"live": False, "fetched_at": fetched, "limits": _claude_limits_from(util), "error": err}
 
 
 def _copilot_snapshot() -> dict | None:
