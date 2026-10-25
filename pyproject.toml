@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "token-usage"
+dynamic = ["version"]
+description = "Local dashboard for token usage and quotas of terminal AI coding agents"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "token_usage/vendor/LICENSE-chartjs.md"]
+requires-python = ">=3.10"
+authors = [{ name = "Leonardo Almeida" }]
+classifiers = [
+    "Environment :: Web Environment",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+
+[project.optional-dependencies]
+tray = ["pystray>=0.19.5", "Pillow>=10.1"]
+
+[project.scripts]
+token-usage = "token_usage.cli:main"
+
+[project.gui-scripts]
+token-usage-tray = "token_usage.cli:tray_main"
+
+[project.urls]
+Homepage = "https://github.com/leoalmeidasa/token-usage"
+
+[tool.hatch.version]
+path = "token_usage/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["token_usage"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.github", "/packaging"]
