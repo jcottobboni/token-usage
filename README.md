@@ -66,6 +66,8 @@ pythonw.exe C:\path\to\token-usage\server.py
 
 `tray.py` adds an icon to the top bar (GNOME, KDE), the Windows notification area or the macOS menu bar. The ring shows the lowest remaining quota across all tools. Clicking it opens a menu with each quota, today's and this month's tokens per tool, and **Open detailed dashboard**. If `server.py` is not running, the icon starts it in the same process.
 
+**Show in bar** picks one quota to display as text next to the icon (for example `Claude 2%`), as % used or % remaining. The choice is saved in `~/.config/token-usage/tray.json` (`%APPDATA%\token-usage\tray.json` on Windows). On Windows, where the tray does not accept text, the number is drawn inside the ring.
+
 It needs `pystray` and Pillow. On Linux it also needs PyGObject with AppIndicator; on GNOME, enable the AppIndicator extension (already on by default in Ubuntu).
 
 ```bash
