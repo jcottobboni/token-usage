@@ -1,0 +1,97 @@
+# token-usage
+
+[English](README.md) · **Português**
+
+Painel local que mostra quantos tokens você gastou nos agentes de IA de terminal e quanto ainda resta das cotas de cada plano.
+
+- **Um único arquivo Python**, só biblioteca padrão. Sem `pip install`, sem build.
+- **100% local**: lê os arquivos que as próprias ferramentas já gravam no seu disco. O servidor escuta apenas em `127.0.0.1` e a página não carrega nada de fora.
+- **Mostra só o que você usa**: ferramentas não instaladas não aparecem na interface.
+
+## Ferramentas suportadas
+
+| Ferramenta | Histórico de tokens | Cota restante |
+|---|---|---|
+| Claude Code | `~/.claude/projects/**/*.jsonl` | API OAuth do Claude Code (fallback: cache em `~/.claude.json`) |
+| GitHub Copilot CLI | `~/.copilot/session-store.db` | API do GitHub via `gh auth token` (fallback: `~/.copilot/session-state`) |
+| OpenAI Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` (respeita `CODEX_HOME`) | API do ChatGPT usada pelo `/status` (fallback: último `rate_limits` gravado nos rollouts) |
+| Gemini CLI | `~/.gemini/tmp/*/chats/*.json` | — |
+| Google Antigravity | — (conversas não ficam legíveis em disco) | language server local do Antigravity, só com o app aberto |
+
+O que o painel mostra:
+
+- **Quanto resta** de cada janela de cota (sessão de 5 h, semanal, premium requests do mês, cota por modelo do Antigravity), com tempo até renovar.
+- **Consumo** por dia, por modelo, por ferramenta e por projeto (diretório de trabalho), separando input novo, output, cache lido e cache gravado.
+
+## Requisitos
+
+- Python 3.10+
+- Linux, macOS ou Windows. A cota do Antigravity depende de `/proc` e `ss`, então só funciona no Linux.
+- Opcional: [`gh`](https://cli.github.com/) autenticado, para a cota do Copilot ao vivo.
+- No macOS, o Claude Code guarda o token no Keychain. Nesse caso, a cota do Claude vem do último valor salvo em `~/.claude.json`.
+
+## Uso
+
+```bash
+git clone https://github.com/leoalmeidasa/token-usage.git
+cd token-usage
+python3 server.py --open
+```
+
+Abre em <http://127.0.0.1:8777/>. Para outra porta: `TOKEN_USAGE_PORT=9000 python3 server.py`.
+
+A página atualiza sozinha a cada 60 s (cotas a cada 30 s).
+
+No Windows, use `py server.py --open` no PowerShell. As pastas `~/.claude`, `~/.copilot` etc. ficam em `%USERPROFILE%`.
+
+### Rodar como serviço (systemd, usuário)
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp contrib/token-usage.service ~/.config/systemd/user/
+# edite ExecStart se o repositório não estiver em ~/token-usage
+systemctl --user daemon-reload
+systemctl --user enable --now token-usage
+```
+
+### Iniciar com o Windows
+
+Crie um atalho na pasta de inicialização (`Win+R` → `shell:startup`) com o destino abaixo. `pythonw` roda sem abrir janela.
+
+```
+pythonw.exe C:\caminho\para\token-usage\server.py
+```
+
+## Como os números são calculados
+
+- **Input novo** não inclui cache. Copilot, Codex e Gemini informam input com cache embutido; o painel subtrai para ficar comparável ao Claude.
+- **Output** do Gemini soma os tokens de raciocínio (`thoughts`). No Codex, `output_tokens` já inclui o raciocínio.
+- **Duplicatas** são removidas: o Claude Code grava várias linhas por resposta, sessões retomadas repetem mensagens e o Codex repete eventos `token_count`.
+- **Premium Copilot** conta só turnos iniciados pelo usuário no Copilot CLI. A cota mensal também inclui uso na IDE e na web.
+
+## Privacidade e segurança
+
+- Nenhum dado de uso sai da máquina. As únicas requisições externas são as consultas de cota, feitas para os mesmos endpoints que cada ferramenta já usa, com as credenciais que ela já guardou:
+  - `api.anthropic.com` (Claude Code)
+  - `api.github.com` (Copilot)
+  - `chatgpt.com` (Codex)
+  
+  O painel só consulta ferramentas que estão instaladas.
+- As credenciais são lidas a cada consulta, nunca copiadas, registradas em log ou devolvidas pela API local.
+- O servidor:
+  - escuta só em `127.0.0.1` e recusa requisições com `Host` diferente de `127.0.0.1`/`localhost` (proteção contra DNS rebinding);
+  - envia `Content-Security-Policy` restritiva, `X-Frame-Options: DENY` e `nosniff`;
+  - escapa todo texto vindo de disco ou rede antes de colocar no HTML.
+- Qualquer processo local do seu usuário consegue ler `/api/usage`, que inclui caminhos de projetos. Não exponha a porta na rede (por exemplo, com proxy reverso ou `ssh -R`).
+- Os endpoints de cota **não são APIs públicas documentadas**. Podem mudar sem aviso; nesse caso o painel cai para o último valor salvo localmente. Use por sua conta e verifique os termos de uso de cada serviço.
+
+## Limitações
+
+- Codex, Gemini e Antigravity foram implementados a partir dos formatos conhecidos dessas ferramentas. Se uma versão nova mudar o formato, abra uma issue com um trecho anonimizado do arquivo.
+- O suporte a macOS e Windows segue os caminhos padrão das ferramentas, mas foi testado só no Linux.
+- Gemini CLI antigo grava só o hash do projeto; nesse caso o projeto aparece como `gemini:<hash>`.
+- Antigravity não grava tokens em formato legível, então só a cota aparece.
+
+## Licença
+
+[MIT](LICENSE). Chart.js 4.4.1 (MIT) está incluído em `vendor/`. Veja `vendor/LICENSE-chartjs.md`.

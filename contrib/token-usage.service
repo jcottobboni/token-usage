@@ -1,0 +1,10 @@
+[Unit]
+Description=Painel local de uso de tokens de agentes de IA
+
+[Service]
+# ajuste o caminho para onde você clonou o repositório
+ExecStart=/usr/bin/python3 %h/token-usage/server.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

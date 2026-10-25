@@ -1,0 +1,547 @@
+#!/usr/bin/env python3
+"""Painel local de uso de tokens de agentes de IA: Claude Code, Copilot CLI, Codex CLI, Gemini CLI e Antigravity.
+
+Lê só arquivos locais das ferramentas e, para cotas, as APIs que as próprias ferramentas usam.
+Nada é enviado para terceiros; o servidor escuta apenas em 127.0.0.1.
+"""
+import json
+import os
+import re
+import shutil
+import sqlite3
+import ssl
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import webbrowser
+from collections import defaultdict
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+HOME = Path.home()
+CLAUDE_DIR = HOME / ".claude" / "projects"
+COPILOT_DB = HOME / ".copilot" / "session-store.db"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or HOME / ".codex")
+CODEX_SESSIONS = CODEX_HOME / "sessions"
+CODEX_AUTH = CODEX_HOME / "auth.json"
+GEMINI_TMP = HOME / ".gemini" / "tmp"
+ANTIGRAVITY_DIR = HOME / ".gemini" / "antigravity"
+HERE = Path(__file__).resolve().parent
+HOST, PORT = "127.0.0.1", int(os.environ.get("TOKEN_USAGE_PORT", "8777"))
+CLAUDE_STATE = HOME / ".claude.json"
+CLAUDE_CREDS = HOME / ".claude" / ".credentials.json"
+COPILOT_STATE = HOME / ".copilot" / "session-state"
+LIMITS_TTL = 60  # segundos entre consultas às APIs de cota
+LIMITS_MIN = 10  # nem o botão de atualizar consulta as APIs mais que isso
+GH = shutil.which("gh") or "/snap/bin/gh"  # systemd não tem /snap/bin no PATH
+# só estes Host são aceitos: bloqueia DNS rebinding de páginas abertas no navegador
+ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; "
+                               "style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "
+                               "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+
+# cache por arquivo: path -> (mtime, size, {dedupe_key: record})
+_file_cache: dict[str, tuple[float, int, dict]] = {}
+_records_lock = threading.Lock()
+
+
+def local_day(ts: str) -> str:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d")
+
+
+def project_name(cwd: str | None, folder: str) -> str:
+    if cwd:
+        return cwd.replace(str(HOME), "~") or "~"
+    return folder
+
+
+def record(day, source, model, project, session, inp=0, outp=0, cr=0, cw=0, premium=0.0) -> dict:
+    return {"day": day, "source": source, "model": model, "project": project, "session": session,
+            "input": max(inp, 0), "output": outp, "cache_read": cr, "cache_write": cw,
+            "requests": 1, "premium": premium}
+
+
+def cached_records(paths, parser, seen: set) -> dict:
+    """Reparseia só arquivos que mudaram; deduplica pelas chaves que o parser devolve."""
+    out = {}
+    for path in paths:
+        p = str(path)
+        seen.add(p)
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        cached = _file_cache.get(p)
+        if not cached or cached[0] != st.st_mtime or cached[1] != st.st_size:
+            try:
+                cached = (st.st_mtime, st.st_size, parser(path))
+            except (OSError, ValueError) as e:
+                print(f"ignorando {p}: {e}", file=sys.stderr, flush=True)
+                cached = (st.st_mtime, st.st_size, {})
+            _file_cache[p] = cached
+        out.update(cached[2])
+    return out
+
+
+def parse_claude_file(path: Path) -> dict:
+    recs = {}
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"usage"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            msg = d.get("message") or {}
+            u = msg.get("usage")
+            model = msg.get("model")
+            if not u or not model or model == "<synthetic>" or not d.get("timestamp"):
+                continue
+            # o Claude Code grava uma linha por bloco de conteúdo com o mesmo usage
+            key = ("claude", msg.get("id"), d.get("requestId"))
+            recs[key] = record(local_day(d["timestamp"]), "claude", model,
+                               project_name(d.get("cwd"), path.parent.name), d.get("sessionId") or path.stem,
+                               u.get("input_tokens") or 0, u.get("output_tokens") or 0,
+                               u.get("cache_read_input_tokens") or 0, u.get("cache_creation_input_tokens") or 0)
+    return recs
+
+
+def claude_records(seen: set) -> list[dict]:
+    if not CLAUDE_DIR.is_dir():
+        return []
+    # sessões retomadas/forks repetem mensagens em arquivos distintos
+    return list(cached_records(CLAUDE_DIR.rglob("*.jsonl"), parse_claude_file, seen).values())
+
+
+def parse_codex_file(path: Path) -> dict:
+    """Rollout do Codex CLI: um evento token_count por resposta do modelo."""
+    recs = {}
+    session, cwd, model = path.stem, None, "codex"
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"session_meta"' not in line and '"turn_context"' not in line and '"token_count"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            p = d.get("payload") or {}
+            if d.get("type") == "session_meta":
+                session = p.get("id") or session
+                cwd = p.get("cwd") or cwd
+            elif d.get("type") == "turn_context":
+                model = p.get("model") or model
+                cwd = p.get("cwd") or cwd
+            elif p.get("type") == "token_count" and p.get("info") and d.get("timestamp"):
+                last = p["info"].get("last_token_usage") or {}
+                total = p["info"].get("total_token_usage") or {}
+                # o mesmo total acumulado reaparece em eventos repetidos e em sessões retomadas
+                key = ("codex", session, total.get("total_tokens"), total.get("input_tokens"))
+                cached = last.get("cached_input_tokens") or 0
+                # input_tokens inclui o cache lido; output_tokens já inclui o raciocínio
+                recs[key] = record(local_day(d["timestamp"]), "codex", model, project_name(cwd, "?"), session,
+                                   (last.get("input_tokens") or 0) - cached, last.get("output_tokens") or 0, cached)
+    return recs
+
+
+def codex_records(seen: set) -> list[dict]:
+    if not CODEX_SESSIONS.is_dir():
+        return []
+    return list(cached_records(CODEX_SESSIONS.rglob("rollout-*.jsonl"), parse_codex_file, seen).values())
+
+
+def _gemini_project(chat_dir: Path) -> str:
+    # versões novas gravam a raiz do projeto; as antigas só têm o hash sha256 do caminho
+    root = chat_dir.parent / ".project_root"
+    try:
+        return project_name(root.read_text(encoding="utf-8").strip(), "")
+    except OSError:
+        name = chat_dir.parent.name
+        return f"gemini:{name[:12]}" if re.fullmatch(r"[0-9a-f]{64}", name) else name
+
+
+def parse_gemini_file(path: Path) -> dict:
+    recs = {}
+    d = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    session = d.get("sessionId") or path.stem
+    project = _gemini_project(path.parent)
+    for m in d.get("messages") or []:
+        t = m.get("tokens")
+        if m.get("type") != "gemini" or not t or not m.get("timestamp"):
+            continue
+        cached = t.get("cached") or 0
+        # input do Gemini inclui o cache lido; thoughts é cobrado como output
+        recs[("gemini", session, m.get("id") or m["timestamp"])] = record(
+            local_day(m["timestamp"]), "gemini", m.get("model") or "gemini", project, session,
+            (t.get("input") or 0) - cached, (t.get("output") or 0) + (t.get("thoughts") or 0), cached)
+    return recs
+
+
+def gemini_records(seen: set) -> list[dict]:
+    if not GEMINI_TMP.is_dir():
+        return []
+    return list(cached_records(GEMINI_TMP.glob("*/chats/*.json"), parse_gemini_file, seen).values())
+
+
+def copilot_records() -> list[dict]:
+    if not COPILOT_DB.exists():
+        return []
+    # as_uri() gera file:///C:/... no Windows e escapa espaços e "?" no caminho
+    con = sqlite3.connect(f"{COPILOT_DB.as_uri()}?mode=ro", uri=True, timeout=5)
+    try:
+        rows = con.execute(
+            """select u.created_at, u.model, coalesce(s.cwd, ''), u.session_id,
+                      coalesce(u.input_tokens,0), coalesce(u.output_tokens,0),
+                      coalesce(u.cache_read_tokens,0), coalesce(u.cache_write_tokens,0),
+                      coalesce(u.request_multiplier,0), u.initiator
+               from assistant_usage_events u left join sessions s on s.id = u.session_id"""
+        ).fetchall()
+    finally:
+        con.close()
+    # input_tokens do Copilot já inclui cache lido e gravado; separa para bater com o Claude
+    # só turnos iniciados pelo usuário consomem premium request
+    return [record(local_day(ts), "copilot", model, project_name(cwd, "?"), sess, inp - cr - cw, outp, cr, cw,
+                   mult if initiator == "user" else 0.0)
+            for ts, model, cwd, sess, inp, outp, cr, cw, mult, initiator in rows]
+
+
+def _get_json(url: str, headers: dict, body: dict | None = None, context=None) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"User-Agent": "token-usage-dashboard", "Accept": "application/json",
+                                          **({"Content-Type": "application/json"} if body is not None else {}),
+                                          **headers})
+    with urllib.request.urlopen(req, timeout=10, context=context) as res:
+        return json.load(res)
+
+
+def _err(e: Exception) -> str:
+    # mensagens curtas; nunca incluem cabeçalhos (onde ficam os tokens)
+    return f"{type(e).__name__}: {e}"[:200]
+
+
+def _claude_limits_from(util: dict) -> list[dict]:
+    labels = {"session": "Sessão (5 h)", "weekly_all": "Semanal · todos os modelos",
+              "weekly_opus": "Semanal · Opus", "weekly_sonnet": "Semanal · Sonnet"}
+    out = []
+    for lim in util.get("limits") or []:
+        out.append({"label": labels.get(lim["kind"], lim["kind"]), "used_pct": lim.get("percent") or 0,
+                    "resets_at": lim.get("resets_at"), "severity": lim.get("severity")})
+    return out
+
+
+def claude_limits() -> dict:
+    try:
+        # o Claude Code renova o token e regrava o arquivo; relê a cada consulta
+        token = json.loads(CLAUDE_CREDS.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+        util = _get_json("https://api.anthropic.com/api/oauth/usage",
+                         {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
+        return {"live": True, "fetched_at": time.time(), "limits": _claude_limits_from(util), "error": None}
+    except Exception as e:  # noqa: BLE001
+        err = _err(e)
+    # sem API: usa o último valor que o próprio Claude Code guardou
+    try:
+        cached = json.loads(CLAUDE_STATE.read_text(encoding="utf-8")).get("cachedUsageUtilization") or {}
+        return {"live": False, "fetched_at": (cached.get("fetchedAtMs") or 0) / 1000,
+                "limits": _claude_limits_from(cached.get("utilization") or {}), "error": err}
+    except Exception as e:  # noqa: BLE001
+        return {"live": False, "fetched_at": None, "limits": [], "error": f"{err}; cache: {_err(e)}"}
+
+
+def _copilot_snapshot() -> dict | None:
+    files = sorted(COPILOT_STATE.glob("*/events.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files[:10]:
+        last = None
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"quotaSnapshots"' in line:
+                    last = line
+        if not last:
+            continue
+        d = json.loads(last)
+        stack = [d]
+        while stack:
+            o = stack.pop()
+            if isinstance(o, dict):
+                if "quotaSnapshots" in o:
+                    q = o["quotaSnapshots"].get("premium_interactions") or {}
+                    ts = datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")).timestamp()
+                    return {"entitlement": q.get("entitlementRequests"), "used": q.get("usedRequests"),
+                            "resets_at": q.get("resetDate"), "fetched_at": ts}
+                stack.extend(o.values())
+            elif isinstance(o, list):
+                stack.extend(o)
+    return None
+
+
+def copilot_limits() -> dict:
+    try:
+        token = subprocess.run([GH, "auth", "token"], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        d = _get_json("https://api.github.com/copilot_internal/user",
+                      {"Authorization": f"token {token}", "X-GitHub-Api-Version": "2025-04-01"})
+        q = d["quota_snapshots"]["premium_interactions"]
+        ent = q.get("entitlement") or 0
+        used = ent - (q.get("remaining") or 0)
+        reset = d.get("quota_reset_date")
+        snap = {"entitlement": ent, "used": used, "resets_at": f"{reset}T00:00:00Z" if reset else None,
+                "fetched_at": time.time(), "unlimited": q.get("unlimited"), "plan": d.get("copilot_plan")}
+        live, err = True, None
+    except Exception as e:  # noqa: BLE001
+        snap, live, err = _copilot_snapshot(), False, _err(e)
+    if not snap:
+        return {"live": False, "fetched_at": None, "limits": [], "error": err}
+    ent, used = snap["entitlement"] or 0, snap["used"] or 0
+    lim = {"label": "Premium requests (mês)", "used_pct": 0 if snap.get("unlimited") else (used / ent * 100 if ent else 100),
+           "resets_at": snap["resets_at"], "used": used, "total": ent}
+    return {"live": live, "fetched_at": snap["fetched_at"], "limits": [lim], "error": err, "plan": snap.get("plan")}
+
+
+def _window_label(minutes) -> str:
+    return {300: "Sessão (5 h)", 10080: "Semanal"}.get(minutes) or (f"Janela de {minutes / 60:g} h" if minutes else "Janela")
+
+
+def _iso(epoch) -> str | None:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat() if epoch else None
+
+
+def _codex_snapshot() -> dict | None:
+    """Último rate_limits que o Codex CLI gravou nos rollouts."""
+    if not CODEX_SESSIONS.is_dir():
+        return None
+    files = sorted(CODEX_SESSIONS.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files[:10]:
+        last = None
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"rate_limits"' in line:
+                    last = line
+        if not last:
+            continue
+        d = json.loads(last)
+        rl = (d.get("payload") or {}).get("rate_limits") or {}
+        ts = datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")).timestamp()
+        out = []
+        for w in (rl.get("primary"), rl.get("secondary")):
+            if not w:
+                continue
+            reset = w.get("resets_at") or (ts + w["resets_in_seconds"] if w.get("resets_in_seconds") is not None else None)
+            out.append({"label": _window_label(w.get("window_minutes")), "used_pct": w.get("used_percent") or 0,
+                        "resets_at": _iso(reset)})
+        if out:
+            return {"fetched_at": ts, "limits": out, "plan": rl.get("plan_type")}
+    return None
+
+
+def codex_limits() -> dict:
+    try:
+        # mesmo endpoint que o /status do Codex usa com login ChatGPT
+        tok = json.loads(CODEX_AUTH.read_text(encoding="utf-8"))["tokens"]
+        d = _get_json("https://chatgpt.com/backend-api/wham/usage",
+                      {"Authorization": f"Bearer {tok['access_token']}", "ChatGPT-Account-Id": tok.get("account_id") or ""})
+        rl = d.get("rate_limit") or {}
+        out = []
+        for w in (rl.get("primary_window"), rl.get("secondary_window")):
+            if not w:
+                continue
+            secs = w.get("limit_window_seconds")
+            reset = w.get("reset_at") or (time.time() + w["reset_after_seconds"] if w.get("reset_after_seconds") is not None else None)
+            out.append({"label": _window_label(secs // 60 if secs else None), "used_pct": w.get("used_percent") or 0,
+                        "resets_at": _iso(reset)})
+        return {"live": True, "fetched_at": time.time(), "limits": out, "error": None, "plan": d.get("plan_type")}
+    except Exception as e:  # noqa: BLE001
+        err = _err(e)
+    snap = _codex_snapshot()
+    if not snap:
+        return {"live": False, "fetched_at": None, "limits": [], "error": err}
+    return {"live": False, "error": err, **snap}
+
+
+def _antigravity_server() -> tuple[int, str] | None:
+    """PID e token CSRF do language server que o Antigravity sobe localmente."""
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            # processo de outro usuário: não é nosso Antigravity
+            if proc.stat().st_uid != os.getuid():
+                continue
+            args = (proc / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        cmd = b" ".join(args).decode(errors="replace")
+        # o Windsurf usa o mesmo binário; filtra pelo caminho do Antigravity
+        if "language_server" not in cmd or "antigravity" not in cmd.lower() or "--csrf_token" not in cmd:
+            continue
+        m = re.search(r"--csrf_token[ =](\S+)", cmd)
+        if m:
+            return int(proc.name), m.group(1)
+    return None
+
+
+def _listening_ports(pid: int) -> list[int]:
+    out = subprocess.run(["ss", "-tlnpH"], capture_output=True, text=True, timeout=5).stdout
+    ports = []
+    for line in out.splitlines():
+        if f"pid={pid}," in line:
+            m = re.search(r"(?:127\.0\.0\.1|\[::1\]|\*|0\.0\.0\.0):(\d+)\s", line)
+            if m:
+                ports.append(int(m.group(1)))
+    return ports
+
+
+def antigravity_limits() -> dict:
+    if not sys.platform.startswith("linux"):
+        # a descoberta do language server usa /proc e ss
+        return {"live": False, "fetched_at": None, "limits": [], "error": "cota do Antigravity só é lida no Linux"}
+    srv = _antigravity_server()
+    if not srv:
+        return {"live": False, "fetched_at": None, "limits": [], "error": "Antigravity não está aberto"}
+    pid, csrf = srv
+    # o language server usa certificado autoassinado; a conexão nunca sai de 127.0.0.1
+    insecure = ssl.create_default_context()
+    insecure.check_hostname = False
+    insecure.verify_mode = ssl.CERT_NONE
+    err = "nenhuma porta do language server respondeu"
+    for port in _listening_ports(pid):
+        for scheme, ctx in (("https", insecure), ("http", None)):
+            try:
+                d = _get_json(f"{scheme}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus",
+                              {"X-Codeium-Csrf-Token": csrf, "Connect-Protocol-Version": "1"},
+                              {"metadata": {"ideName": "antigravity", "extensionName": "antigravity", "locale": "en"}}, ctx)
+            except Exception as e:  # noqa: BLE001
+                err = _err(e)
+                continue
+            us = d.get("userStatus") or {}
+            out = []
+            for c in (us.get("cascadeModelConfigData") or {}).get("clientModelConfigs") or []:
+                q = c.get("quotaInfo")
+                if not q:
+                    continue
+                out.append({"label": c.get("label") or "?", "used_pct": (1 - (q.get("remainingFraction") or 0)) * 100,
+                            "resets_at": q.get("resetTime")})
+            plan = ((us.get("planStatus") or {}).get("planInfo") or {}).get("planName")
+            return {"live": True, "fetched_at": time.time(), "limits": out, "error": None, "plan": plan}
+    return {"live": False, "fetched_at": None, "limits": [], "error": err}
+
+
+def installed() -> list[str]:
+    """Ferramentas com dados nesta máquina; a interface só mostra estas."""
+    found = {
+        "claude": CLAUDE_DIR.is_dir() or CLAUDE_CREDS.exists(),
+        "copilot": COPILOT_DB.exists() or COPILOT_STATE.is_dir(),
+        "codex": CODEX_SESSIONS.is_dir() or CODEX_AUTH.exists(),
+        # ~/.gemini também é criado pelo Antigravity; só conta com chats do Gemini CLI
+        "gemini": any(GEMINI_TMP.glob("*/chats/*.json")),
+        "antigravity": ANTIGRAVITY_DIR.is_dir() or (HOME / ".config" / "Antigravity").is_dir(),
+    }
+    return [k for k, v in found.items() if v]
+
+
+def _safe(fn) -> dict:
+    # uma ferramenta com formato inesperado não pode derrubar as outras
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001
+        print(f"erro em {fn.__name__}: {e!r}", file=sys.stderr, flush=True)
+        return {"live": False, "fetched_at": None, "limits": [], "error": _err(e)}
+
+
+LIMIT_SOURCES = {"claude": claude_limits, "copilot": copilot_limits, "codex": codex_limits, "antigravity": antigravity_limits}
+_limits_lock = threading.Lock()
+_limits_cache: tuple[float, dict] | None = None
+
+
+def limits(force: bool = False) -> dict:
+    global _limits_cache
+    with _limits_lock:
+        age = time.time() - _limits_cache[0] if _limits_cache else None
+        if age is None or age > LIMITS_TTL or (force and age > LIMITS_MIN):
+            # não consulta APIs de ferramentas que o usuário não usa
+            _limits_cache = (time.time(), {k: _safe(LIMIT_SOURCES[k]) for k in installed() if k in LIMIT_SOURCES})
+        return _limits_cache[1]
+
+
+def aggregate() -> dict:
+    agg = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+                               "requests": 0, "premium": 0.0, "sessions": set()})
+    seen: set[str] = set()
+    # ThreadingHTTPServer: requisições simultâneas não podem mexer no cache ao mesmo tempo
+    with _records_lock:
+        recs = claude_records(seen) + copilot_records() + codex_records(seen) + gemini_records(seen)
+        for p in set(_file_cache) - seen:
+            del _file_cache[p]
+    for r in recs:
+        a = agg[(r["day"], r["source"], r["model"], r["project"])]
+        for k in ("input", "output", "cache_read", "cache_write", "requests", "premium"):
+            a[k] += r[k]
+        a["sessions"].add(r["session"])
+    rows = []
+    for (day, source, model, project), a in agg.items():
+        a["sessions"] = sorted(a["sessions"])
+        rows.append({"day": day, "source": source, "model": model, "project": project, **a})
+    rows.sort(key=lambda r: r["day"])
+    return {"generated": datetime.now().astimezone().isoformat(timespec="seconds"), "sources": installed(), "rows": rows}
+
+
+STATIC = {"/app.js": "app.js", "/vendor/chart.umd.min.js": "vendor/chart.umd.min.js"}
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "token-usage"
+    sys_version = ""
+
+    def log_message(self, *args):
+        pass
+
+    def _send(self, code: int, body: bytes, ctype: str):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.headers.get("Host") not in ALLOWED_HOSTS:
+            return self._send(421, b"host not allowed", "text/plain")
+        url = urlparse(self.path)
+        if url.path in ("/", "/index.html"):
+            self._send(200, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+        elif url.path in STATIC:
+            self._send(200, (HERE / STATIC[url.path]).read_bytes(), "text/javascript; charset=utf-8")
+        elif url.path == "/api/usage":
+            try:
+                self._send(200, json.dumps(aggregate()).encode(), "application/json")
+            except Exception as e:  # noqa: BLE001
+                print(f"erro em /api/usage: {e!r}", file=sys.stderr, flush=True)
+                self._send(500, json.dumps({"error": _err(e)}).encode(), "application/json")
+        elif url.path == "/api/limits":
+            body = json.dumps(limits(force="force" in url.query)).encode()
+            self._send(200, body, "application/json")
+        else:
+            self._send(404, b"not found", "text/plain")
+
+
+def main():
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    url = f"http://{HOST}:{PORT}/"
+    print(f"Token usage em {url}", flush=True)
+    if "--open" in sys.argv:
+        webbrowser.open(url)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Uso de Tokens</title>
+<!-- Chart.js 4.4.1 (MIT) vendorizado: o painel não faz nenhuma requisição externa -->
+<script src="vendor/chart.umd.min.js"></script>
+<style>
+  /* Catppuccin Mocha suavizado: sem preto/branco puros (fotofobia) */
+  :root {
+    --bg: #24273a; --panel: #2c3045; --panel2: #343850; --line: #44495e;
+    --text: #c8cde0; --muted: #8f96ad; --accent: #8aadf4;
+    --claude: #e8a87c; --copilot: #8bd5ca; --codex: #f5bde6; --gemini: #91d7e3; --antigravity: #eed49f;
+    --input: #8aadf4; --output: #c6a0f6; --cread: #6e8bb8; --cwrite: #a6da95;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 "Inter", "Noto Sans", system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           padding: 16px 24px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 auto 0 0; }
+  .seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line);
+         border-radius: 8px; overflow: hidden; }
+  .seg button, .btn { background: none; border: 0; color: var(--muted); padding: 6px 12px;
+         font: inherit; cursor: pointer; }
+  .seg button.on { background: var(--panel2); color: var(--text); }
+  .btn { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  .btn:hover, .seg button:hover { color: var(--text); }
+  main { padding: 20px 24px 40px; display: grid; gap: 20px; max-width: 1400px; margin: 0 auto; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .kpi .l { color: var(--muted); font-size: 13px; }
+  .kpi .v { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi .s { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .card h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; display: flex; gap: 8px; align-items: center; }
+  .card h2 .seg { margin-left: auto; font-size: 12px; }
+  .chart { position: relative; height: 300px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13.5px; }
+  th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; word-break: break-all; }
+  th { color: var(--muted); font-weight: 500; cursor: pointer; user-select: none; }
+  .tag { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .scroll { max-height: 380px; overflow: auto; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; }
+  .err { color: #ee99a0; }
+  .limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .lim { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 8px; }
+  .lim .top { display: flex; align-items: baseline; gap: 8px; }
+  .lim .src { font-size: 12px; color: var(--muted); display: flex; align-items: center; }
+  .lim .name { font-weight: 600; }
+  .lim .pct { margin-left: auto; font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .lim .pct small { font-size: 13px; color: var(--muted); font-weight: 400; }
+  .bar { height: 10px; background: var(--panel2); border-radius: 5px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 5px; transition: width .4s; }
+  .lim .meta { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  .live { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  .sect { font-size: 14px; color: var(--muted); margin: 0 0 -8px; font-weight: 500; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } header, main { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Uso de tokens</h1>
+  <div class="seg" id="range">
+    <button data-v="1">Hoje</button><button data-v="7">7d</button>
+    <button data-v="30" class="on">30d</button><button data-v="90">90d</button><button data-v="0">Tudo</button>
+  </div>
+  <div class="seg" id="source" hidden></div>
+  <button class="btn" id="reload" title="Atualiza (auto a cada 60 s)">↻ Atualizar</button>
+</header>
+<main>
+  <h2 class="sect" id="limits-title">Quanto resta</h2>
+  <section class="limits" id="limits"></section>
+  <h2 class="sect">Consumo</h2>
+  <section class="kpis" id="kpis"></section>
+  <section class="grid2">
+    <div class="card">
+      <h2>Por dia
+        <div class="seg" id="metric">
+          <button data-v="total" class="on">Total</button><button data-v="input">Input</button>
+          <button data-v="output">Output</button><button data-v="cache_read">Cache lido</button>
+          <button data-v="cache_write">Cache gravado</button>
+        </div>
+      </h2>
+      <div class="chart"><canvas id="daily"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Composição</h2>
+      <div class="chart"><canvas id="mix"></canvas></div>
+    </div>
+  </section>
+  <section class="grid2">
+    <div class="card"><h2>Por modelo</h2><div class="scroll"><table id="models"></table></div></div>
+    <div class="card"><h2>Por ferramenta</h2><div class="scroll"><table id="sources"></table></div></div>
+  </section>
+  <section class="card"><h2>Por projeto (cwd)</h2><div class="scroll"><table id="projects"></table></div></section>
+  <footer id="foot"></footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
